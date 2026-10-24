@@ -44,6 +44,8 @@ jobs:
             --volume "$PWD:/work" --volume /tmp/phpcs-3.13.6.phar:/phpcs.phar:ro \
             --workdir /work quanta-phpcs-proof:local bash -c '
               set -euo pipefail
+              echo "Container routes (--network none):"
+              cat /proc/net/route
               php --version
               git --version
               php /phpcs.phar --version
@@ -55,11 +57,4 @@ jobs:
             ' 2>&1 | tee proof/linux-tests.log
           git diff --exit-code
           sha256sum .githooks/pre-push .githooks/check-style.php tests/pre_push_test.php \
-            .phpcs.xml composer.json README.md > proof/source-sha256.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: phpcs-linux-proof
-          path: proof/
-          if-no-files-found: error
-          retention-days: 3
+            .phpcs.xml composer.json README.md | tee proof/source-sha256.txt
