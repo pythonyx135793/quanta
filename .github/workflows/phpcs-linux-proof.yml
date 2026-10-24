@@ -1,0 +1,65 @@
+name: PHPCS Linux proof
+
+on:
+  push:
+    branches: [codex/phpcs-linux-proof-r596]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: f0ec2830110e44cb77790c931965e573196252d8
+          persist-credentials: false
+      - name: Prepare official runtime and verified checker
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof tmp
+          git rev-parse HEAD 'HEAD^{tree}' | tee proof/source.txt
+          test "$(git rev-parse HEAD)" = f0ec2830110e44cb77790c931965e573196252d8
+          curl --fail --location --output /tmp/phpcs-3.13.6.phar \
+            https://github.com/PHPCSStandards/PHP_CodeSniffer/releases/download/3.13.6/phpcs.phar
+          echo 'aed4148cee26285a73e694a98d4675b84f81ef86b2581f811d3c402c0d3d7d23  /tmp/phpcs-3.13.6.phar' | sha256sum --check
+          docker pull php:8.5.12-cli
+          docker image inspect php:8.5.12-cli --format '{{json .RepoDigests}}' | tee proof/runtime-image.txt
+          docker build --tag quanta-phpcs-proof:local - <<'DOCKERFILE'
+          FROM php:8.5.12-cli
+          RUN apt-get update && apt-get install -y --no-install-recommends git \
+              && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+      - name: Real local Git pushes with external networking disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none \
+            --user "$(id -u):$(id -g)" \
+            --env HOME=/work/tmp --env TMPDIR=/work/tmp \
+            --volume "$PWD:/work" --volume /tmp/phpcs-3.13.6.phar:/phpcs.phar:ro \
+            --workdir /work quanta-phpcs-proof:local bash -c '
+              set -euo pipefail
+              php --version
+              git --version
+              php /phpcs.phar --version
+              php -l .githooks/check-style.php
+              php -l tests/pre_push_test.php
+              sh -n .githooks/pre-push
+              php /phpcs.phar --standard=.phpcs.xml .githooks/check-style.php
+              php tests/pre_push_test.php /phpcs.phar
+            ' 2>&1 | tee proof/linux-tests.log
+          git diff --exit-code
+          sha256sum .githooks/pre-push .githooks/check-style.php tests/pre_push_test.php \
+            .phpcs.xml composer.json README.md > proof/source-sha256.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: phpcs-linux-proof
+          path: proof/
+          if-no-files-found: error
+          retention-days: 3
