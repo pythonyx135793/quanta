@@ -1,0 +1,74 @@
+name: Behat failure and cleanup control
+
+on:
+  push:
+    branches: [codex/behat-failure-proof-r596]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  control:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: bdfbd22c457765d109fcfab3abd62892f45b5d53
+          persist-credentials: false
+      - name: Build the exact frozen application fixture
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = bdfbd22c457765d109fcfab3abd62892f45b5d53
+          git rev-parse HEAD 'HEAD^{tree}'
+          docker build -f tests/behat/Dockerfile -t quanta-behat-control:local .
+      - name: Deliberately failing assertion must propagate and clean up
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/behat-control.php" <<'PHP'
+          <?php
+          $file = '/app/features/quanta.feature';
+          $original = file_get_contents($file);
+          $needle = 'Then the page contains "Quanta behavior fixture"';
+          if (substr_count($original, $needle) !== 1) {
+              throw new RuntimeException('Expected exactly one control target.');
+          }
+          file_put_contents($file, str_replace($needle,
+              'Then the page contains "deliberate-control-must-not-appear"', $original));
+          try {
+              $process = proc_open([PHP_BINARY, 'tests/behat/run.php', '--name=A visitor reads the fixture homepage'],
+                  [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, '/app');
+              if (!is_resource($process)) {
+                  throw new RuntimeException('Could not start control.');
+              }
+              $output = stream_get_contents($pipes[1]);
+              $error = stream_get_contents($pipes[2]);
+              fclose($pipes[1]);
+              fclose($pipes[2]);
+              $code = proc_close($process);
+              echo $output, $error;
+              if ($code !== 1 || !str_contains($output, '1 scenario (1 failed)') ||
+                  !str_contains($output, 'Rendered page does not contain: deliberate-control-must-not-appear')) {
+                  throw new RuntimeException('Expected the real assertion to fail with exit 1; actual exit ' . $code);
+              }
+              if (glob(sys_get_temp_dir() . '/quanta-behat-*') !== []) {
+                  throw new RuntimeException('Owned fixture remained after failure.');
+              }
+              if ($connection = @fsockopen('127.0.0.1', 8080, $errno, $message, 0.2)) {
+                  fclose($connection);
+                  throw new RuntimeException('Owned Apache port remained open after failure.');
+              }
+              echo "CONTROL PASS: real assertion failed, exit 1 propagated, fixture absent, owned port closed.\n";
+          } finally {
+              file_put_contents($file, $original);
+              if (hash_file('sha256', $file) !== hash('sha256', $original)) {
+                  throw new RuntimeException('Control source was not restored.');
+              }
+          }
+          PHP
+          docker run --rm --network none --entrypoint php \
+            --volume "$RUNNER_TEMP/behat-control.php:/control.php:ro" \
+            quanta-behat-control:local /control.php
+          git diff --exit-code
